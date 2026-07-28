@@ -129,29 +129,49 @@ stop_all_services() {
     log "所有服务已停止."
 }
 
-# 在两个节点上拉起容器
+# 在两个节点上拉起容器 (容器已在运行则跳过)
 setup_containers() {
     log_sep "拉起容器..."
 
     # P 节点: 启动 vllm_deepseek_v4 容器
-    log "P 节点 (${P_NODE}): 启动 ${VLLM_CONTAINER} 容器..."
-    cd "${DOCKER_SCRIPTS_PATH}" && bash start_docker.sh
-    log "P 节点 ${VLLM_CONTAINER} 容器已启动."
+    if docker ps --format '{{.Names}}' | grep -q "^${VLLM_CONTAINER}$"; then
+        log "P 节点 ${VLLM_CONTAINER} 容器已在运行，跳过."
+    else
+        log "P 节点 (${P_NODE}): 启动 ${VLLM_CONTAINER} 容器..."
+        docker rm -f "${VLLM_CONTAINER}" 2>/dev/null || true
+        cd "${DOCKER_SCRIPTS_PATH}" && bash start_docker.sh
+        log "P 节点 ${VLLM_CONTAINER} 容器已启动."
+    fi
 
     # P 节点: 启动 benchmark 容器
-    log "P 节点 (${P_NODE}): 启动 ${TEST_CONTAINER} 容器..."
-    cd "${DOCKER_SCRIPTS_PATH}" && bash start_docker_benchmark.sh
-    log "P 节点 ${TEST_CONTAINER} 容器已启动."
+    if docker ps --format '{{.Names}}' | grep -q "^${TEST_CONTAINER}$"; then
+        log "P 节点 ${TEST_CONTAINER} 容器已在运行，跳过."
+    else
+        log "P 节点 (${P_NODE}): 启动 ${TEST_CONTAINER} 容器..."
+        docker rm -f "${TEST_CONTAINER}" 2>/dev/null || true
+        cd "${DOCKER_SCRIPTS_PATH}" && bash start_docker_benckmark.sh
+        log "P 节点 ${TEST_CONTAINER} 容器已启动."
+    fi
 
     # D 节点: 启动 vllm_deepseek_v4 容器
-    log "D 节点 (${D_NODE}): 启动 ${VLLM_CONTAINER} 容器..."
-    ssh "$D_NODE" "cd ${DOCKER_SCRIPTS_PATH} && bash start_docker.sh"
-    log "D 节点 ${VLLM_CONTAINER} 容器已启动."
+    if ssh "$D_NODE" "docker ps --format '{{.Names}}'" 2>/dev/null | grep -q "^${VLLM_CONTAINER}$"; then
+        log "D 节点 ${VLLM_CONTAINER} 容器已在运行，跳过."
+    else
+        log "D 节点 (${D_NODE}): 启动 ${VLLM_CONTAINER} 容器..."
+        ssh "$D_NODE" "docker rm -f ${VLLM_CONTAINER} 2>/dev/null || true"
+        ssh "$D_NODE" "cd ${DOCKER_SCRIPTS_PATH} && bash start_docker.sh"
+        log "D 节点 ${VLLM_CONTAINER} 容器已启动."
+    fi
 
     # D 节点: 启动 benchmark 容器
-    log "D 节点 (${D_NODE}): 启动 ${TEST_CONTAINER} 容器..."
-    ssh "$D_NODE" "cd ${DOCKER_SCRIPTS_PATH} && bash start_docker_benchmark.sh"
-    log "D 节点 ${TEST_CONTAINER} 容器已启动."
+    if ssh "$D_NODE" "docker ps --format '{{.Names}}'" 2>/dev/null | grep -q "^${TEST_CONTAINER}$"; then
+        log "D 节点 ${TEST_CONTAINER} 容器已在运行，跳过."
+    else
+        log "D 节点 (${D_NODE}): 启动 ${TEST_CONTAINER} 容器..."
+        ssh "$D_NODE" "docker rm -f ${TEST_CONTAINER} 2>/dev/null || true"
+        ssh "$D_NODE" "cd ${DOCKER_SCRIPTS_PATH} && bash start_docker_benckmark.sh"
+        log "D 节点 ${TEST_CONTAINER} 容器已启动."
+    fi
 
     # 等待容器完全就绪
     sleep 5
