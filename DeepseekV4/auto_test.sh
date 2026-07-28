@@ -301,21 +301,25 @@ start_proxy() {
 check_service_health() {
     local dp=$1
 
-    # 通过代理健康检查端点检测所有实例是否就绪
-    local health
-    health=$(run_p "curl -s --connect-timeout 5 http://localhost:${PROXY_PORT}/healthcheck" 2>/dev/null || echo "")
+    # 检测 P 节点容器内 vllm 进程数 (每个 dp rank 一个 vllm serve 进程)
+    local p_running
+    p_running=$(run_p "pgrep -c -f 'vllm serve' 2>/dev/null" 2>/dev/null || echo "0")
+    p_running=$(echo "$p_running" | tr -d '[:space:]')
 
-    if [ -z "$health" ]; then
-        return 1
-    fi
+    # 检测 D 节点容器内 vllm 进程数
+    local d_running
+    d_running=$(run_d "pgrep -c -f 'vllm serve' 2>/dev/null" 2>/dev/null || echo "0")
+    d_running=$(echo "$d_running" | tr -d '[:space:]')
 
-    # 检查返回的 JSON 是否包含正确的实例数
-    local p_count
-    p_count=$(echo "$health" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('prefill_instances',0))" 2>/dev/null || echo "0")
-    local d_count
-    d_count=$(echo "$health" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('decode_instances',0))" 2>/dev/null || echo "0")
+    # 检测 proxy 是否在运行
+    local proxy_up
+    proxy_up=$(run_p "pgrep -c -f 'load_balance_proxy_server_example' 2>/dev/null" 2>/dev/null || echo "0")
+    proxy_up=$(echo "$proxy_up" | tr -d '[:space:]')
 
-    if [ "$p_count" -eq "$dp" ] 2>/dev/null && [ "$d_count" -eq "$dp" ] 2>/dev/null; then
+    # vllm 进程数 >= dp 即认为实例已拉起 (vllm serve 只有在模型加载完成后才会启动 HTTP server)
+    if [ "$p_running" -ge "$dp" ] 2>/dev/null && \
+       [ "$d_running" -ge "$dp" ] 2>/dev/null && \
+       [ "$proxy_up" -ge 1 ] 2>/dev/null; then
         return 0
     fi
 
@@ -338,7 +342,10 @@ wait_for_services() {
             return 0
         fi
 
-        log "等待中... (${elapsed}s / ${MAX_WAIT}s)"
+        # 打印当前进程计数
+        local p_now=$(run_p "pgrep -c -f 'vllm serve' 2>/dev/null || echo 0" 2>/dev/null | tr -d '[:space:]')
+        local d_now=$(run_d "pgrep -c -f 'vllm serve' 2>/dev/null || echo 0" 2>/dev/null | tr -d '[:space:]')
+        log "等待中... (${elapsed}s / ${MAX_WAIT}s) | P_vllm:${p_now} D_vllm:${d_now} (目标:>=${dp})"
 
         # 每60秒打印一次日志尾部用于排查
         if [ $(( elapsed % 60 )) -eq 0 ] && [ $elapsed -gt 0 ]; then
@@ -382,9 +389,12 @@ run_benchmark() {
         local run_name="run_${run_idx}"
         log_sep "执行第 ${run_idx} 次测试: config=${config_name}"
 
-        # 记录服务健康状态 (保存到容器内)
-        log "记录服务健康状态..."
-        run_p "curl -s http://localhost:${PROXY_PORT}/healthcheck > ${config_result_dir}/health_${run_name}.json 2>/dev/null" 2>/dev/null || true
+        # 记录服务进程状态 (保存到容器内)
+        log "记录服务进程状态..."
+        run_p "echo 'P vllm processes:' > ${config_result_dir}/health_${run_name}.txt; \
+               pgrep -c -f 'vllm serve' 2>/dev/null >> ${config_result_dir}/health_${run_name}.txt; \
+               echo 'D vllm processes:' >> ${config_result_dir}/health_${run_name}.txt" 2>/dev/null || true
+        run_d "pgrep -c -f 'vllm serve' 2>/dev/null >> ${config_result_dir}/health_${run_name}.txt" 2>/dev/null || true
 
         # 在 D 节点的 vllm_performance_test 容器中运行测试
         log "在 D 节点 (${D_NODE}) 的 ${TEST_CONTAINER} 容器中运行 run.sh..."
@@ -415,10 +425,11 @@ run_benchmark() {
         else
             log "警告: 第 ${run_idx} 次测试退出码非零: ${test_exit_code} (耗时 ${test_duration}s)"
             # 采集错误诊断信息
-            log "--- 错误诊断: 采集后端日志 ---"
-            log "Proxy 健康状态:"
-            run_p "curl -s http://localhost:${PROXY_PORT}/healthcheck 2>/dev/null" 2>/dev/null || echo "(无法连接)"
-            log "P 节点 vllm 日志 (尾部):"
+            log "--- 错误诊断: 采集后端状态 ---"
+            log "P 节点 vllm 进程数:"
+            run_p "pgrep -c -f 'vllm serve' 2>/dev/null || echo 0" 2>/dev/null || echo "(检测失败)"
+            log "D 节点 vllm 进程数:"
+            run_d "pgrep -c -f 'vllm serve' 2>/dev/null || echo 0" 2>/dev/null || echo "(检测失败)"
             run_p "tail -30 /tmp/p_instance_dp${dp}_tp${tp}.log 2>/dev/null" 2>/dev/null || echo "(无日志)"
             log "D 节点 vllm 日志 (尾部):"
             run_d "tail -30 /tmp/d_instance_dp${dp}_tp${tp}.log 2>/dev/null" 2>/dev/null || echo "(无日志)"
