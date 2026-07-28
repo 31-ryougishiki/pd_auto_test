@@ -345,7 +345,7 @@ check_service_health() {
     if [[ "$CHECK_SIDE" == *"P"* ]]; then
         for (( port=VLLM_START_PORT; port<VLLM_START_PORT+dp; port++ )); do
             local status
-            status=$(run_p "curl -s -o /dev/null -w '%{http_code}' --connect-timeout 3 http://localhost:${port}/health 2>/dev/null" 2>/dev/null || echo "000")
+            status=$(run_p "curl -s -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 5 http://localhost:${port}/health 2>/dev/null" 2>/dev/null || echo "000")
             status=$(echo "$status" | tr -d '[:space:]')
             if [ "$status" = "200" ]; then
                 p_ready=$(( p_ready + 1 ))
@@ -359,7 +359,7 @@ check_service_health() {
     if [[ "$CHECK_SIDE" == *"D"* ]]; then
         for (( port=VLLM_START_PORT; port<VLLM_START_PORT+dp; port++ )); do
             local status
-            status=$(run_d "curl -s -o /dev/null -w '%{http_code}' --connect-timeout 3 http://localhost:${port}/health 2>/dev/null" 2>/dev/null || echo "000")
+            status=$(run_d "curl -s -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 5 http://localhost:${port}/health 2>/dev/null" 2>/dev/null || echo "000")
             status=$(echo "$status" | tr -d '[:space:]')
             if [ "$status" = "200" ]; then
                 d_ready=$(( d_ready + 1 ))
@@ -405,13 +405,13 @@ wait_for_services() {
         local p_ok=0; local d_ok=0
         if [[ "$CHECK_SIDE" == *"P"* ]]; then
             for (( port=VLLM_START_PORT; port<VLLM_START_PORT+dp; port++ )); do
-                local s=$(run_p "curl -s -o /dev/null -w '%{http_code}' --connect-timeout 2 http://localhost:${port}/health 2>/dev/null" 2>/dev/null | tr -d '[:space:]' || echo "0")
+                local s=$(run_p "curl -s -o /dev/null -w '%{http_code}' --connect-timeout 2 --max-time 4 http://localhost:${port}/health 2>/dev/null" 2>/dev/null | tr -d '[:space:]' || echo "0")
                 [ "$s" = "200" ] && p_ok=$(( p_ok + 1 ))
             done
         fi
         if [[ "$CHECK_SIDE" == *"D"* ]]; then
             for (( port=VLLM_START_PORT; port<VLLM_START_PORT+dp; port++ )); do
-                local s=$(run_d "curl -s -o /dev/null -w '%{http_code}' --connect-timeout 2 http://localhost:${port}/health 2>/dev/null" 2>/dev/null | tr -d '[:space:]' || echo "0")
+                local s=$(run_d "curl -s -o /dev/null -w '%{http_code}' --connect-timeout 2 --max-time 4 http://localhost:${port}/health 2>/dev/null" 2>/dev/null | tr -d '[:space:]' || echo "0")
                 [ "$s" = "200" ] && d_ok=$(( d_ok + 1 ))
             done
         fi
@@ -475,12 +475,12 @@ run_benchmark() {
         log "记录 vllm 端口健康状态..."
         run_p "echo '=== P 节点端口探测 ===' > ${config_result_dir}/health_${run_name}.txt" 2>/dev/null || true
         for (( port=VLLM_START_PORT; port<VLLM_START_PORT+dp; port++ )); do
-            local ps=$(run_p "curl -s -o /dev/null -w '%{http_code}' --connect-timeout 2 http://localhost:${port}/health 2>/dev/null" 2>/dev/null | tr -d '[:space:]' || echo "0")
+            local ps=$(run_p "curl -s -o /dev/null -w '%{http_code}' --connect-timeout 2 --max-time 4 http://localhost:${port}/health 2>/dev/null" 2>/dev/null | tr -d '[:space:]' || echo "0")
             run_p "echo 'P:${port} -> ${ps}' >> ${config_result_dir}/health_${run_name}.txt" 2>/dev/null || true
         done
         run_p "echo '=== D 节点端口探测 ===' >> ${config_result_dir}/health_${run_name}.txt" 2>/dev/null || true
         for (( port=VLLM_START_PORT; port<VLLM_START_PORT+dp; port++ )); do
-            local ds=$(run_d "curl -s -o /dev/null -w '%{http_code}' --connect-timeout 2 http://localhost:${port}/health 2>/dev/null" 2>/dev/null | tr -d '[:space:]' || echo "0")
+            local ds=$(run_d "curl -s -o /dev/null -w '%{http_code}' --connect-timeout 2 --max-time 4 http://localhost:${port}/health 2>/dev/null" 2>/dev/null | tr -d '[:space:]' || echo "0")
             run_p "echo 'D:${port} -> ${ds}' >> ${config_result_dir}/health_${run_name}.txt" 2>/dev/null || true
         done
 
@@ -516,7 +516,7 @@ run_benchmark() {
             log "--- 错误诊断: 采集后端状态 ---"
             log "P 节点 vllm 端口探测 (7100-71$((dp-1))):"
             for (( port=VLLM_START_PORT; port<VLLM_START_PORT+dp; port++ )); do
-                local s=$(run_p "curl -s -o /dev/null -w '%{http_code}' --connect-timeout 2 http://localhost:${port}/health 2>/dev/null" 2>/dev/null | tr -d '[:space:]' || echo "0")
+                local s=$(run_p "curl -s -o /dev/null -w '%{http_code}' --connect-timeout 2 --max-time 4 http://localhost:${port}/health 2>/dev/null" 2>/dev/null | tr -d '[:space:]' || echo "0")
                 echo -n " ${port}:${s}"
             done
             echo ""
