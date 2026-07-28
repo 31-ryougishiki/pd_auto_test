@@ -694,9 +694,32 @@ log "所有依赖检查通过."
 
 # 清理函数 - 脚本退出时执行
 cleanup_on_exit() {
+    local script_dir=$(cd "$(dirname "$0")" && pwd)
+
     log ""
-    log "脚本退出，执行清理..."
-    log "主机临时文件保留在: ${HOST_TMP} (请手动清理)"
+    log_sep "脚本退出，执行清理..."
+
+    # 1. 从容器导出测试结果到当前目录
+    log "导出测试结果到: ${script_dir}/test_results/"
+    mkdir -p "${script_dir}/test_results"
+    docker cp "${VLLM_CONTAINER}:${RESULT_BASE}/${TIMESTAMP}" "${script_dir}/test_results/" 2>/dev/null && \
+        log "结果已导出." || log "(无结果需要导出)"
+
+    # 2. 停止 P 节点容器
+    log "停止 P 节点容器..."
+    docker stop "${VLLM_CONTAINER}" 2>/dev/null || true
+    docker stop "${TEST_CONTAINER}" 2>/dev/null || true
+
+    # 3. 停止 D 节点容器
+    log "停止 D 节点容器..."
+    ssh "$D_NODE" "docker stop ${VLLM_CONTAINER} ${TEST_CONTAINER} 2>/dev/null || true"
+
+    # 4. 清理临时文件
+    log "清理临时文件..."
+    rm -rf "${HOST_TMP}" 2>/dev/null || true
+    ssh "$D_NODE" "rm -rf /tmp/dsv4_auto_test_* /tmp/update_kv.sed /tmp/pd_auto_test.tar.gz 2>/dev/null" 2>/dev/null || true
+
+    log "清理完成."
 }
 
 trap cleanup_on_exit EXIT
