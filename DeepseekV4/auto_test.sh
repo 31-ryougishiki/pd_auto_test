@@ -99,20 +99,20 @@ run_test_d() {
 stop_all_services() {
     log_sep "停止所有服务..."
 
-    # 停止 P 节点上的 vllm 进程
-    log "停止 P 节点 (${P_NODE}) 上的 vllm 进程..."
+    # 停止 P 节点容器内的 vllm 进程 (作用域: 仅 ${VLLM_CONTAINER} 容器)
+    log "停止 P 节点容器内 vllm 进程 (${VLLM_CONTAINER})..."
     run_p "pkill -9 -f 'vllm serve' 2>/dev/null || true"
     run_p "pkill -9 -f 'launch_online_dp' 2>/dev/null || true"
     run_p "pkill -9 -f 'run_dp_template' 2>/dev/null || true"
 
-    # 停止 D 节点上的 vllm 进程
-    log "停止 D 节点 (${D_NODE}) 上的 vllm 进程..."
+    # 停止 D 节点容器内的 vllm 进程 (作用域: 仅 ${VLLM_CONTAINER} 容器)
+    log "停止 D 节点容器内 vllm 进程 (${VLLM_CONTAINER})..."
     run_d "pkill -9 -f 'vllm serve' 2>/dev/null || true"
     run_d "pkill -9 -f 'launch_online_dp' 2>/dev/null || true"
     run_d "pkill -9 -f 'run_dp_template' 2>/dev/null || true"
 
-    # 停止 P 节点上的代理
-    log "停止代理..."
+    # 停止 P 节点容器内的代理 (作用域: 仅 ${VLLM_CONTAINER} 容器)
+    log "停止代理容器内进程..."
     run_p "pkill -9 -f 'load_balance_proxy_server_example' 2>/dev/null || true"
 
     # 等待进程完全退出并释放 NPU 资源
