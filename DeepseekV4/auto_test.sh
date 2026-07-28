@@ -178,6 +178,25 @@ setup_containers() {
     log "所有容器已拉起."
 }
 
+# 同步项目文件到 D 节点容器 (D 节点没有挂载项目目录)
+sync_project_to_d() {
+    log_sep "同步项目文件到 D 节点..."
+
+    log "从 P 容器导出项目文件..."
+    docker exec "$VLLM_CONTAINER" tar -czf /tmp/pd_auto_test.tar.gz \
+        -C /opt/its/z30055003 pd_auto_test 2>/dev/null
+
+    log "传输到 D 节点主机..."
+    docker cp "${VLLM_CONTAINER}:/tmp/pd_auto_test.tar.gz" "${HOST_TMP}/pd_auto_test.tar.gz"
+    scp -q "${HOST_TMP}/pd_auto_test.tar.gz" "${D_NODE}:/tmp/pd_auto_test.tar.gz"
+
+    log "导入到 D 容器..."
+    ssh "$D_NODE" "docker cp /tmp/pd_auto_test.tar.gz ${VLLM_CONTAINER}:/tmp/pd_auto_test.tar.gz"
+    run_d "tar -xzf /tmp/pd_auto_test.tar.gz -C /opt/its/z30055003/ && echo 'sync ok'"
+
+    log "D 节点同步完成."
+}
+
 update_kv_config() {
     local dp=$1
     local tp=$2
@@ -498,6 +517,9 @@ main() {
         stop_all_services || {
             log "警告: 停止服务时出现错误，继续执行..."
         }
+
+        # ---- Step 1.5: 同步项目文件到 D 节点 ----
+        sync_project_to_d
 
         # ---- Step 2: 更新 kv_connector_extra_config ----
         update_kv_config "$dp" "$tp" || {
