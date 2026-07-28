@@ -79,19 +79,19 @@ log_sep() {
 # ==================== 远程执行函数 ====================
 # 使用 stdin 方式传递命令，避免嵌套引号问题
 
-# 在 P 节点的 vllm 容器内执行命令 (命令通过 stdin 传入)
+# 在 P 节点的 vllm 容器内执行命令 (命令通过 stdin 传入，使用登录 shell 确保环境变量正确)
 run_p() {
-    docker exec -i "$VLLM_CONTAINER" bash -s <<< "$*"
+    docker exec -i "$VLLM_CONTAINER" bash -l -s <<< "$*"
 }
 
-# 在 D 节点的 vllm 容器内执行命令 (命令通过 stdin 传入)
+# 在 D 节点的 vllm 容器内执行命令 (命令通过 stdin 传入，使用登录 shell 确保环境变量正确)
 run_d() {
-    ssh "$D_NODE" "docker exec -i $VLLM_CONTAINER bash -s" <<< "$*"
+    ssh "$D_NODE" "docker exec -i $VLLM_CONTAINER bash -l -s" <<< "$*"
 }
 
 # 在 D 节点的 test 容器内执行命令 (命令通过 stdin 传入)
 run_test_d() {
-    ssh "$D_NODE" "docker exec -i $TEST_CONTAINER bash -s" <<< "$*"
+    ssh "$D_NODE" "docker exec -i $TEST_CONTAINER bash -l -s" <<< "$*"
 }
 
 # ==================== 服务管理函数 ====================
