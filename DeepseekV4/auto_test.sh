@@ -404,6 +404,17 @@ run_benchmark() {
             log "第 ${run_idx} 次测试完成 (耗时 ${test_duration}s, 退出码: ${test_exit_code})"
         else
             log "警告: 第 ${run_idx} 次测试退出码非零: ${test_exit_code} (耗时 ${test_duration}s)"
+            # 采集错误诊断信息
+            log "--- 错误诊断: 采集后端日志 ---"
+            log "Proxy 健康状态:"
+            run_p "curl -s http://localhost:${PROXY_PORT}/healthcheck 2>/dev/null" 2>/dev/null || echo "(无法连接)"
+            log "P 节点 vllm 日志 (尾部):"
+            run_p "tail -30 /tmp/p_instance_dp${dp}_tp${tp}.log 2>/dev/null" 2>/dev/null || echo "(无日志)"
+            log "D 节点 vllm 日志 (尾部):"
+            run_d "tail -30 /tmp/d_instance_dp${dp}_tp${tp}.log 2>/dev/null" 2>/dev/null || echo "(无日志)"
+            log "Proxy 日志 (尾部):"
+            run_p "tail -30 /tmp/proxy_dp${dp}.log 2>/dev/null" 2>/dev/null || echo "(无日志)"
+            log "--- 错误诊断结束 ---"
         fi
         log "日志已保存: 容器内 ${config_result_dir}/${run_name}.log"
 
