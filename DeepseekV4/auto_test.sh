@@ -115,17 +115,8 @@ stop_all_services() {
     log "停止代理..."
     run_p "pkill -9 -f 'load_balance_proxy_server_example' 2>/dev/null || true"
 
-    # 等待进程完全退出
-    sleep 10
-
-    # 释放 GPU 资源 (尝试清理，失败不中断)
-    log "清理 P 节点 GPU 资源..."
-    run_p "for i in \$(seq 0 15); do fuser -k /dev/npu\$i 2>/dev/null; done" 2>/dev/null || true
-
-    log "清理 D 节点 GPU 资源..."
-    run_d "for i in \$(seq 0 15); do fuser -k /dev/npu\$i 2>/dev/null; done" 2>/dev/null || true
-
-    sleep 5
+    # 等待进程完全退出并释放 NPU 资源
+    sleep 15
     log "所有服务已停止."
 }
 
