@@ -102,23 +102,34 @@ run_test_d() {
 # ==================== 服务管理函数 ====================
 
 stop_all_services() {
-    log_sep "停止所有服务..."
+    log_sep "停止所有服务 (检测范围: ${CHECK_SIDE})..."
 
     # 停止 P 节点容器内的 vllm 进程 (作用域: 仅 ${VLLM_CONTAINER} 容器)
-    log "停止 P 节点容器内 vllm 进程 (${VLLM_CONTAINER})..."
-    run_p "pkill -9 -f 'vllm serve' 2>/dev/null || true"
-    run_p "pkill -9 -f 'launch_online_dp' 2>/dev/null || true"
-    run_p "pkill -9 -f 'run_dp_template' 2>/dev/null || true"
+    if [[ "$CHECK_SIDE" == *"P"* ]]; then
+        log "停止 P 节点容器内 vllm 进程 (${VLLM_CONTAINER})..."
+        run_p "pkill -9 -f 'vllm serve' 2>/dev/null || true"
+        run_p "pkill -9 -f 'launch_online_dp' 2>/dev/null || true"
+        run_p "pkill -9 -f 'run_dp_template' 2>/dev/null || true"
+    else
+        log "跳过 P 节点 (CHECK_SIDE=${CHECK_SIDE})."
+    fi
 
     # 停止 D 节点容器内的 vllm 进程 (作用域: 仅 ${VLLM_CONTAINER} 容器)
-    log "停止 D 节点容器内 vllm 进程 (${VLLM_CONTAINER})..."
-    run_d "pkill -9 -f 'vllm serve' 2>/dev/null || true"
-    run_d "pkill -9 -f 'launch_online_dp' 2>/dev/null || true"
-    run_d "pkill -9 -f 'run_dp_template' 2>/dev/null || true"
+    if [[ "$CHECK_SIDE" == *"D"* ]]; then
+        log "停止 D 节点容器内 vllm 进程 (${VLLM_CONTAINER})..."
+        run_d "pkill -9 -f 'vllm serve' 2>/dev/null || true"
+        run_d "pkill -9 -f 'launch_online_dp' 2>/dev/null || true"
+        run_d "pkill -9 -f 'run_dp_template' 2>/dev/null || true"
+    else
+        log "跳过 D 节点 (CHECK_SIDE=${CHECK_SIDE})."
+    fi
 
     # 停止 P 节点容器内的代理 (作用域: 仅 ${VLLM_CONTAINER} 容器)
-    log "停止代理容器内进程..."
-    run_p "pkill -9 -f 'load_balance_proxy_server_example' 2>/dev/null || true"
+    # 代理只在 PD 双侧检测时才会启动
+    if [ "$CHECK_SIDE" = "PD" ]; then
+        log "停止代理容器内进程..."
+        run_p "pkill -9 -f 'load_balance_proxy_server_example' 2>/dev/null || true"
+    fi
 
     # 等待进程完全退出并释放 NPU 资源
     sleep 15
@@ -127,46 +138,56 @@ stop_all_services() {
 
 # 在两个节点上拉起容器 (容器已在运行则跳过)
 setup_containers() {
-    log_sep "拉起容器..."
+    log_sep "拉起容器 (检测范围: ${CHECK_SIDE})..."
 
-    # P 节点: 启动 vllm_deepseek_v4 容器
-    if docker ps --format '{{.Names}}' | grep -q "^${VLLM_CONTAINER}$"; then
-        log "P 节点 ${VLLM_CONTAINER} 容器已在运行，跳过."
+    # P 节点容器 (仅在需要检测 P 侧时拉起)
+    if [[ "$CHECK_SIDE" == *"P"* ]]; then
+        # P 节点: 启动 vllm_deepseek_v4 容器
+        if docker ps --format '{{.Names}}' | grep -q "^${VLLM_CONTAINER}$"; then
+            log "P 节点 ${VLLM_CONTAINER} 容器已在运行，跳过."
+        else
+            log "P 节点 (${P_NODE}): 启动 ${VLLM_CONTAINER} 容器..."
+            docker rm -f "${VLLM_CONTAINER}" 2>/dev/null || true
+            cd "${DOCKER_SCRIPTS_PATH}" && bash start_docker.sh
+            log "P 节点 ${VLLM_CONTAINER} 容器已启动."
+        fi
+
+        # P 节点: 启动 benchmark 容器
+        if docker ps --format '{{.Names}}' | grep -q "^${TEST_CONTAINER}$"; then
+            log "P 节点 ${TEST_CONTAINER} 容器已在运行，跳过."
+        else
+            log "P 节点 (${P_NODE}): 启动 ${TEST_CONTAINER} 容器..."
+            docker rm -f "${TEST_CONTAINER}" 2>/dev/null || true
+            cd "${DOCKER_SCRIPTS_PATH}" && bash start_docker_benckmark.sh
+            log "P 节点 ${TEST_CONTAINER} 容器已启动."
+        fi
     else
-        log "P 节点 (${P_NODE}): 启动 ${VLLM_CONTAINER} 容器..."
-        docker rm -f "${VLLM_CONTAINER}" 2>/dev/null || true
-        cd "${DOCKER_SCRIPTS_PATH}" && bash start_docker.sh
-        log "P 节点 ${VLLM_CONTAINER} 容器已启动."
+        log "跳过 P 节点容器拉起 (CHECK_SIDE=${CHECK_SIDE})."
     fi
 
-    # P 节点: 启动 benchmark 容器
-    if docker ps --format '{{.Names}}' | grep -q "^${TEST_CONTAINER}$"; then
-        log "P 节点 ${TEST_CONTAINER} 容器已在运行，跳过."
-    else
-        log "P 节点 (${P_NODE}): 启动 ${TEST_CONTAINER} 容器..."
-        docker rm -f "${TEST_CONTAINER}" 2>/dev/null || true
-        cd "${DOCKER_SCRIPTS_PATH}" && bash start_docker_benckmark.sh
-        log "P 节点 ${TEST_CONTAINER} 容器已启动."
-    fi
+    # D 节点容器 (仅在需要检测 D 侧时拉起)
+    if [[ "$CHECK_SIDE" == *"D"* ]]; then
+        # D 节点: 启动 vllm_deepseek_v4 容器
+        if ssh "$D_NODE" "docker ps --format '{{.Names}}'" 2>/dev/null | grep -q "^${VLLM_CONTAINER}$"; then
+            log "D 节点 ${VLLM_CONTAINER} 容器已在运行，跳过."
+        else
+            log "D 节点 (${D_NODE}): 启动 ${VLLM_CONTAINER} 容器..."
+            ssh "$D_NODE" "docker rm -f ${VLLM_CONTAINER} 2>/dev/null || true"
+            ssh "$D_NODE" "cd ${DOCKER_SCRIPTS_PATH} && bash start_docker.sh"
+            log "D 节点 ${VLLM_CONTAINER} 容器已启动."
+        fi
 
-    # D 节点: 启动 vllm_deepseek_v4 容器
-    if ssh "$D_NODE" "docker ps --format '{{.Names}}'" 2>/dev/null | grep -q "^${VLLM_CONTAINER}$"; then
-        log "D 节点 ${VLLM_CONTAINER} 容器已在运行，跳过."
+        # D 节点: 启动 benchmark 容器
+        if ssh "$D_NODE" "docker ps --format '{{.Names}}'" 2>/dev/null | grep -q "^${TEST_CONTAINER}$"; then
+            log "D 节点 ${TEST_CONTAINER} 容器已在运行，跳过."
+        else
+            log "D 节点 (${D_NODE}): 启动 ${TEST_CONTAINER} 容器..."
+            ssh "$D_NODE" "docker rm -f ${TEST_CONTAINER} 2>/dev/null || true"
+            ssh "$D_NODE" "cd ${DOCKER_SCRIPTS_PATH} && bash start_docker_benckmark.sh"
+            log "D 节点 ${TEST_CONTAINER} 容器已启动."
+        fi
     else
-        log "D 节点 (${D_NODE}): 启动 ${VLLM_CONTAINER} 容器..."
-        ssh "$D_NODE" "docker rm -f ${VLLM_CONTAINER} 2>/dev/null || true"
-        ssh "$D_NODE" "cd ${DOCKER_SCRIPTS_PATH} && bash start_docker.sh"
-        log "D 节点 ${VLLM_CONTAINER} 容器已启动."
-    fi
-
-    # D 节点: 启动 benchmark 容器
-    if ssh "$D_NODE" "docker ps --format '{{.Names}}'" 2>/dev/null | grep -q "^${TEST_CONTAINER}$"; then
-        log "D 节点 ${TEST_CONTAINER} 容器已在运行，跳过."
-    else
-        log "D 节点 (${D_NODE}): 启动 ${TEST_CONTAINER} 容器..."
-        ssh "$D_NODE" "docker rm -f ${TEST_CONTAINER} 2>/dev/null || true"
-        ssh "$D_NODE" "cd ${DOCKER_SCRIPTS_PATH} && bash start_docker_benckmark.sh"
-        log "D 节点 ${TEST_CONTAINER} 容器已启动."
+        log "跳过 D 节点容器拉起 (CHECK_SIDE=${CHECK_SIDE})."
     fi
 
     # 等待容器完全就绪
@@ -177,6 +198,13 @@ setup_containers() {
 # 同步项目文件到 D 节点容器 (D 节点没有挂载项目目录)
 sync_project_to_d() {
     log_sep "同步项目文件到 D 节点..."
+
+    # 检查 P 容器是否可用 (同步需要从 P 容器导出文件)
+    if ! docker ps --format '{{.Names}}' | grep -q "^${VLLM_CONTAINER}$"; then
+        log "错误: P 节点容器 ${VLLM_CONTAINER} 未运行，无法同步项目文件到 D 节点."
+        log "请先确保 P 容器已启动，或使用 --check PD 模式."
+        return 1
+    fi
 
     log "从 P 容器导出项目文件..."
     docker exec "$VLLM_CONTAINER" tar -czf /tmp/pd_auto_test.tar.gz \
@@ -197,7 +225,7 @@ update_kv_config() {
     local dp=$1
     local tp=$2
 
-    log "更新 kv_connector_extra_config: dp_size=${dp}, tp_size=${tp}"
+    log "更新 kv_connector_extra_config: dp_size=${dp}, tp_size=${tp} (检测范围: ${CHECK_SIDE})"
 
     # 创建 sed 脚本文件 (避免嵌套引号问题)
     cat > "${HOST_TMP}/update_kv.sed" << SEDEOF
@@ -205,21 +233,26 @@ s/"dp_size": [0-9]*/"dp_size": ${dp}/g
 s/"tp_size": [0-9]*/"tp_size": ${tp}/g
 SEDEOF
 
-    # 复制到 P 容器并执行
-    docker cp "${HOST_TMP}/update_kv.sed" "${VLLM_CONTAINER}:/tmp/update_kv.sed"
-    run_p "sed -i -f /tmp/update_kv.sed ${P_SCRIPT_DIR}/run_dp_template.sh"
+    # 仅在检测 P 侧时更新 P 容器
+    if [[ "$CHECK_SIDE" == *"P"* ]]; then
+        docker cp "${HOST_TMP}/update_kv.sed" "${VLLM_CONTAINER}:/tmp/update_kv.sed"
+        run_p "sed -i -f /tmp/update_kv.sed ${P_SCRIPT_DIR}/run_dp_template.sh"
+        log "P 节点 kv_connector_extra_config 更新后:"
+        run_p "grep -A6 'kv_connector_extra_config' ${P_SCRIPT_DIR}/run_dp_template.sh | head -12" || true
+    else
+        log "跳过 P 节点 KV 配置更新 (CHECK_SIDE=${CHECK_SIDE})."
+    fi
 
-    # 复制到 D 节点主机, 再 docker cp 到 D 容器
-    scp -q "${HOST_TMP}/update_kv.sed" "${D_NODE}:/tmp/update_kv.sed"
-    ssh "$D_NODE" "docker cp /tmp/update_kv.sed ${VLLM_CONTAINER}:/tmp/update_kv.sed"
-    run_d "sed -i -f /tmp/update_kv.sed ${D_SCRIPT_DIR}/run_dp_template.sh"
-
-    # 验证更新结果
-    log "P 节点 kv_connector_extra_config 更新后:"
-    run_p "grep -A6 'kv_connector_extra_config' ${P_SCRIPT_DIR}/run_dp_template.sh | head -12" || true
-
-    log "D 节点 kv_connector_extra_config 更新后:"
-    run_d "grep -A6 'kv_connector_extra_config' ${D_SCRIPT_DIR}/run_dp_template.sh | head -12" || true
+    # 仅在检测 D 侧时更新 D 容器
+    if [[ "$CHECK_SIDE" == *"D"* ]]; then
+        scp -q "${HOST_TMP}/update_kv.sed" "${D_NODE}:/tmp/update_kv.sed"
+        ssh "$D_NODE" "docker cp /tmp/update_kv.sed ${VLLM_CONTAINER}:/tmp/update_kv.sed"
+        run_d "sed -i -f /tmp/update_kv.sed ${D_SCRIPT_DIR}/run_dp_template.sh"
+        log "D 节点 kv_connector_extra_config 更新后:"
+        run_d "grep -A6 'kv_connector_extra_config' ${D_SCRIPT_DIR}/run_dp_template.sh | head -12" || true
+    else
+        log "跳过 D 节点 KV 配置更新 (CHECK_SIDE=${CHECK_SIDE})."
+    fi
 
     log "kv_connector_extra_config 更新完成."
 }
@@ -386,12 +419,18 @@ wait_for_services() {
 
         # 每60秒打印一次日志尾部用于排查
         if [ $(( elapsed % 60 )) -eq 0 ] && [ $elapsed -gt 0 ]; then
-            log "--- P 实例日志尾部 ---"
-            run_p "tail -5 /tmp/p_instance_dp${dp}_tp${tp}.log 2>/dev/null" 2>/dev/null || true
-            log "--- D 实例日志尾部 ---"
-            run_d "tail -5 /tmp/d_instance_dp${dp}_tp${tp}.log 2>/dev/null" 2>/dev/null || true
-            log "--- 代理日志尾部 ---"
-            run_p "tail -5 /tmp/proxy_dp${dp}.log 2>/dev/null" 2>/dev/null || true
+            if [[ "$CHECK_SIDE" == *"P"* ]]; then
+                log "--- P 实例日志尾部 ---"
+                run_p "tail -5 /tmp/p_instance_dp${dp}_tp${tp}.log 2>/dev/null" 2>/dev/null || true
+            fi
+            if [[ "$CHECK_SIDE" == *"D"* ]]; then
+                log "--- D 实例日志尾部 ---"
+                run_d "tail -5 /tmp/d_instance_dp${dp}_tp${tp}.log 2>/dev/null" 2>/dev/null || true
+            fi
+            if [ "$CHECK_SIDE" = "PD" ]; then
+                log "--- 代理日志尾部 ---"
+                run_p "tail -5 /tmp/proxy_dp${dp}.log 2>/dev/null" 2>/dev/null || true
+            fi
         fi
 
         sleep $WAIT_INTERVAL
@@ -399,12 +438,18 @@ wait_for_services() {
     done
 
     log "错误: 服务在 ${MAX_WAIT}s 内未就绪!"
-    log "=== P 实例完整日志 ==="
-    run_p "cat /tmp/p_instance_dp${dp}_tp${tp}.log 2>/dev/null" 2>/dev/null || true
-    log "=== D 实例完整日志 ==="
-    run_d "cat /tmp/d_instance_dp${dp}_tp${tp}.log 2>/dev/null" 2>/dev/null || true
-    log "=== 代理完整日志 ==="
-    run_p "cat /tmp/proxy_dp${dp}.log 2>/dev/null" 2>/dev/null || true
+    if [[ "$CHECK_SIDE" == *"P"* ]]; then
+        log "=== P 实例完整日志 ==="
+        run_p "cat /tmp/p_instance_dp${dp}_tp${tp}.log 2>/dev/null" 2>/dev/null || true
+    fi
+    if [[ "$CHECK_SIDE" == *"D"* ]]; then
+        log "=== D 实例完整日志 ==="
+        run_d "cat /tmp/d_instance_dp${dp}_tp${tp}.log 2>/dev/null" 2>/dev/null || true
+    fi
+    if [ "$CHECK_SIDE" = "PD" ]; then
+        log "=== 代理完整日志 ==="
+        run_p "cat /tmp/proxy_dp${dp}.log 2>/dev/null" 2>/dev/null || true
+    fi
     return 1
 }
 
@@ -475,7 +520,7 @@ run_benchmark() {
                 echo -n " ${port}:${s}"
             done
             echo ""
-            log "D 节点 vllm 端口探测:"
+            log "P 节点 vllm 日志 (尾部):"
             run_p "tail -30 /tmp/p_instance_dp${dp}_tp${tp}.log 2>/dev/null" 2>/dev/null || echo "(无日志)"
             log "D 节点 vllm 日志 (尾部):"
             run_d "tail -30 /tmp/d_instance_dp${dp}_tp${tp}.log 2>/dev/null" 2>/dev/null || echo "(无日志)"
@@ -670,7 +715,11 @@ main() {
     # 打印结果目录结构
     log ""
     log "结果目录结构:"
-    run_p "find ${RESULT_BASE}/${TIMESTAMP} -type f 2>/dev/null | sort" 2>/dev/null || true
+    if [[ "$CHECK_SIDE" == *"P"* ]]; then
+        run_p "find ${RESULT_BASE}/${TIMESTAMP} -type f 2>/dev/null | sort" 2>/dev/null || true
+    else
+        log "(P 容器不可用，跳过)"
+    fi
 }
 
 # ==================== 脚本入口 ====================
@@ -733,14 +782,16 @@ if ! command -v docker &> /dev/null; then
     exit 1
 fi
 
-if ! command -v ssh &> /dev/null; then
-    log "错误: ssh 命令不可用"
-    exit 1
-fi
+if [[ "$CHECK_SIDE" == *"D"* ]]; then
+    if ! command -v ssh &> /dev/null; then
+        log "错误: ssh 命令不可用 (检测 D 侧需要)"
+        exit 1
+    fi
 
-if ! command -v scp &> /dev/null; then
-    log "错误: scp 命令不可用"
-    exit 1
+    if ! command -v scp &> /dev/null; then
+        log "错误: scp 命令不可用 (检测 D 侧需要)"
+        exit 1
+    fi
 fi
 
 # 拉起所有需要的容器
@@ -751,33 +802,41 @@ else
     setup_containers
 fi
 
-# 验证 P 节点容器
-if ! docker ps --format '{{.Names}}' | grep -q "^${VLLM_CONTAINER}$"; then
-    log "错误: P 节点上容器 ${VLLM_CONTAINER} 启动失败"
-    exit 1
+# 验证 P 节点容器 (仅在检测 P 侧时需要)
+if [[ "$CHECK_SIDE" == *"P"* ]]; then
+    if ! docker ps --format '{{.Names}}' | grep -q "^${VLLM_CONTAINER}$"; then
+        log "错误: P 节点上容器 ${VLLM_CONTAINER} 启动失败"
+        exit 1
+    fi
+    log "P 节点容器 ${VLLM_CONTAINER} 运行中."
+else
+    log "跳过 P 节点容器验证 (CHECK_SIDE=${CHECK_SIDE})."
 fi
-log "P 节点容器 ${VLLM_CONTAINER} 运行中."
 
-# 检查是否能免密 SSH 到 D 节点
-if ! ssh -o ConnectTimeout=5 -o BatchMode=yes "$D_NODE" "echo ok" &> /dev/null; then
-    log "错误: 无法免密 SSH 到 D 节点 ${D_NODE}"
-    log "请确保 SSH 免密登录已配置"
-    exit 1
-fi
-log "SSH 到 D 节点 (${D_NODE}) 免密登录正常."
+# 检查是否能免密 SSH 到 D 节点 (仅在检测 D 侧时需要)
+if [[ "$CHECK_SIDE" == *"D"* ]]; then
+    if ! ssh -o ConnectTimeout=5 -o BatchMode=yes "$D_NODE" "echo ok" &> /dev/null; then
+        log "错误: 无法免密 SSH 到 D 节点 ${D_NODE}"
+        log "请确保 SSH 免密登录已配置"
+        exit 1
+    fi
+    log "SSH 到 D 节点 (${D_NODE}) 免密登录正常."
 
-# 验证 D 节点容器
-if ! ssh "$D_NODE" "docker ps --format '{{.Names}}'" 2>/dev/null | grep -q "^${VLLM_CONTAINER}$"; then
-    log "错误: D 节点上容器 ${VLLM_CONTAINER} 启动失败"
-    exit 1
-fi
-log "D 节点容器 ${VLLM_CONTAINER} 运行中."
+    # 验证 D 节点容器
+    if ! ssh "$D_NODE" "docker ps --format '{{.Names}}'" 2>/dev/null | grep -q "^${VLLM_CONTAINER}$"; then
+        log "错误: D 节点上容器 ${VLLM_CONTAINER} 启动失败"
+        exit 1
+    fi
+    log "D 节点容器 ${VLLM_CONTAINER} 运行中."
 
-if ! ssh "$D_NODE" "docker ps --format '{{.Names}}'" 2>/dev/null | grep -q "^${TEST_CONTAINER}$"; then
-    log "错误: D 节点上容器 ${TEST_CONTAINER} 启动失败"
-    exit 1
+    if ! ssh "$D_NODE" "docker ps --format '{{.Names}}'" 2>/dev/null | grep -q "^${TEST_CONTAINER}$"; then
+        log "错误: D 节点上容器 ${TEST_CONTAINER} 启动失败"
+        exit 1
+    fi
+    log "D 节点容器 ${TEST_CONTAINER} 运行中."
+else
+    log "跳过 D 节点 SSH 和容器验证 (CHECK_SIDE=${CHECK_SIDE})."
 fi
-log "D 节点容器 ${TEST_CONTAINER} 运行中."
 
 log "所有依赖检查通过."
 
@@ -786,27 +845,33 @@ cleanup_on_exit() {
     local script_dir=$(cd "$(dirname "$0")" && pwd)
 
     log ""
-    log_sep "脚本退出，执行清理..."
+    log_sep "脚本退出，执行清理 (检测范围: ${CHECK_SIDE})..."
 
-    # 1. 从容器导出测试结果到当前目录
-    log "导出测试结果到: ${script_dir}/test_results/"
-    mkdir -p "${script_dir}/test_results"
-    docker cp "${VLLM_CONTAINER}:${RESULT_BASE}/${TIMESTAMP}" "${script_dir}/test_results/" 2>/dev/null && \
-        log "结果已导出." || log "(无结果需要导出)"
+    # 1. 从容器导出测试结果到当前目录 (仅在 P 容器可用时)
+    if [[ "$CHECK_SIDE" == *"P"* ]]; then
+        log "导出测试结果到: ${script_dir}/test_results/"
+        mkdir -p "${script_dir}/test_results"
+        docker cp "${VLLM_CONTAINER}:${RESULT_BASE}/${TIMESTAMP}" "${script_dir}/test_results/" 2>/dev/null && \
+            log "结果已导出." || log "(无结果需要导出)"
 
-    # 2. 停止 P 节点容器
-    log "停止 P 节点容器..."
-    docker stop "${VLLM_CONTAINER}" 2>/dev/null || true
-    docker stop "${TEST_CONTAINER}" 2>/dev/null || true
+        # 2. 停止 P 节点容器
+        log "停止 P 节点容器..."
+        docker stop "${VLLM_CONTAINER}" 2>/dev/null || true
+        docker stop "${TEST_CONTAINER}" 2>/dev/null || true
+    fi
 
-    # 3. 停止 D 节点容器
-    log "停止 D 节点容器..."
-    ssh "$D_NODE" "docker stop ${VLLM_CONTAINER} ${TEST_CONTAINER} 2>/dev/null || true"
+    # 3. 停止 D 节点容器 (仅在检测 D 侧时)
+    if [[ "$CHECK_SIDE" == *"D"* ]]; then
+        log "停止 D 节点容器..."
+        ssh "$D_NODE" "docker stop ${VLLM_CONTAINER} ${TEST_CONTAINER} 2>/dev/null || true"
+    fi
 
     # 4. 清理临时文件
     log "清理临时文件..."
     rm -rf "${HOST_TMP}" 2>/dev/null || true
-    ssh "$D_NODE" "rm -rf /tmp/dsv4_auto_test_* /tmp/update_kv.sed /tmp/pd_auto_test.tar.gz 2>/dev/null" 2>/dev/null || true
+    if [[ "$CHECK_SIDE" == *"D"* ]]; then
+        ssh "$D_NODE" "rm -rf /tmp/dsv4_auto_test_* /tmp/update_kv.sed /tmp/pd_auto_test.tar.gz 2>/dev/null" 2>/dev/null || true
+    fi
 
     log "清理完成."
 }
