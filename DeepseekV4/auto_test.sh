@@ -86,12 +86,12 @@ log_sep() {
 
 # 在 P 节点的 vllm 容器内执行命令 (命令通过 stdin 传入，使用登录 shell 确保环境变量正确)
 run_p() {
-    docker exec -i "$VLLM_CONTAINER" bash -l -s <<< "$*"
+    docker exec -i "$VLLM_CONTAINER" bash -l -s <<< "export LD_LIBRARY_PATH=/usr/local/lib:\$LD_LIBRARY_PATH; $*"
 }
 
 # 在 D 节点的 vllm 容器内执行命令 (命令通过 stdin 传入，使用登录 shell 确保环境变量正确)
 run_d() {
-    ssh "$D_NODE" "docker exec -i $VLLM_CONTAINER bash -l -s" <<< "$*"
+    ssh "$D_NODE" "docker exec -i $VLLM_CONTAINER bash -l -s" <<< "export LD_LIBRARY_PATH=/usr/local/lib:\$LD_LIBRARY_PATH; $*"
 }
 
 # 在 D 节点的 test 容器内执行命令 (命令通过 stdin 传入)
