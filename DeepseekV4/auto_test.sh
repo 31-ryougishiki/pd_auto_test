@@ -55,6 +55,10 @@ PROXY_PORT=9000
 RESULT_BASE="${PD_AUTO_TEST_PATH}/DeepseekV4/test_results"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
+# 运行模式
+STARTUP_CHECK_ONLY=false
+TARGET_CONFIG=""  # 指定单个 dp/tp 配置，如 "8 2"
+
 # 主机临时目录
 HOST_TMP="/tmp/dsv4_auto_test_${TIMESTAMP}"
 mkdir -p "${HOST_TMP}"
@@ -516,20 +520,30 @@ SUMMARY_EOF
 # ==================== 主流程 ====================
 
 main() {
-    log_sep "DeepSeekV4 1P1D 自动化测试开始"
+    if [ "$STARTUP_CHECK_ONLY" = true ]; then
+        log_sep "DeepSeekV4 1P1D 服务启动检查 (仅验证 P/D 能否拉起)"
+    else
+        log_sep "DeepSeekV4 1P1D 自动化测试开始"
+    fi
     log "测试时间戳: ${TIMESTAMP}"
     log "P 节点: ${P_NODE}"
     log "D 节点: ${D_NODE}"
     log "主机临时目录: ${HOST_TMP}"
 
     # 测试配置列表: "dp tp"
-    local CONFIGS=(
-        "16 1"
-        "8 2"
-        "4 4"
-        "2 8"
-        "1 16"
-    )
+    local CONFIGS
+    if [ -n "$TARGET_CONFIG" ]; then
+        CONFIGS=("$TARGET_CONFIG")
+        log "使用指定配置: dp=${TARGET_CONFIG% *}, tp=${TARGET_CONFIG#* }"
+    else
+        CONFIGS=(
+            "16 1"
+            "8 2"
+            "4 4"
+            "2 8"
+            "1 16"
+        )
+    fi
 
     local total_configs=${#CONFIGS[@]}
     local current_config=0
@@ -581,11 +595,15 @@ main() {
             continue
         fi
 
-        # ---- Step 7: 运行性能测试 ----
-        run_benchmark "$dp" "$tp" || {
-            log "警告: 配置 dp=${dp}, tp=${tp} 测试过程中出现错误."
-            failed_configs="${failed_configs} dp${dp}_tp${tp}(test_error)"
-        }
+        # ---- Step 7: 运行性能测试 (startup-check 模式则跳过) ----
+        if [ "$STARTUP_CHECK_ONLY" = true ]; then
+            log "startup-check 模式: 跳过性能测试，服务拉起验证通过."
+        else
+            run_benchmark "$dp" "$tp" || {
+                log "警告: 配置 dp=${dp}, tp=${tp} 测试过程中出现错误."
+                failed_configs="${failed_configs} dp${dp}_tp${tp}(test_error)"
+            }
+        fi
 
         log ">>>>>> 配置 ${current_config}/${total_configs} (dp=${dp}, tp=${tp}) 测试完成 <<<<<<"
     done
@@ -598,9 +616,18 @@ main() {
     generate_summary
 
     # ---- 最终报告 ----
-    log_sep "自动化测试全部结束!"
-    log "结果保存在容器内: ${RESULT_BASE}/${TIMESTAMP}/"
-    log "主机临时文件: ${HOST_TMP}/"
+    if [ "$STARTUP_CHECK_ONLY" = true ]; then
+        log_sep "服务启动检查结束!"
+        if [ -n "$failed_configs" ]; then
+            log "失败: 以下配置启动失败:${failed_configs}"
+        else
+            log "所有配置 P/D 服务均可正常拉起."
+        fi
+    else
+        log_sep "自动化测试全部结束!"
+        log "结果保存在容器内: ${RESULT_BASE}/${TIMESTAMP}/"
+        log "主机临时文件: ${HOST_TMP}/"
+    fi
 
     if [ -n "$failed_configs" ]; then
         log "警告: 以下配置测试出现问题:${failed_configs}"
@@ -617,6 +644,33 @@ main() {
 
 # ==================== 脚本入口 ====================
 
+# 解析参数
+FORCE_MODE=false
+SKIP_SETUP=false
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --startup-check)
+            STARTUP_CHECK_ONLY=true
+            shift
+            ;;
+        --config)
+            TARGET_CONFIG="$2"
+            shift 2
+            ;;
+        --force|-f)
+            FORCE_MODE=true
+            shift
+            ;;
+        --skip-setup)
+            SKIP_SETUP=true
+            shift
+            ;;
+        *)
+            shift
+            ;;
+    esac
+done
+
 # 检查是否在正确的节点上运行
 CURRENT_IP=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "")
 if [ -z "$CURRENT_IP" ]; then
@@ -626,7 +680,7 @@ fi
 log "当前节点 IP: ${CURRENT_IP}"
 log "主机临时目录: ${HOST_TMP}"
 
-if [ "$1" = "--force" ] || [ "$1" = "-f" ]; then
+if [ "$FORCE_MODE" = true ]; then
     log "强制模式: 跳过 IP 检查"
 elif ! echo "$CURRENT_IP" | grep -q "7.246.78.73"; then
     log "警告: 当前节点 IP 似乎不是 7.246.78.73."
@@ -655,7 +709,7 @@ if ! command -v scp &> /dev/null; then
 fi
 
 # 拉起所有需要的容器
-if [ "$1" = "--skip-setup" ] || [ "$2" = "--skip-setup" ]; then
+if [ "$SKIP_SETUP" = true ]; then
     log "跳过容器拉起 (--skip-setup)"
 else
     log "检查并拉起容器..."
