@@ -57,6 +57,7 @@ TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
 # 运行模式
 STARTUP_CHECK_ONLY=false
+CHECK_SIDE="PD"   # P / D / PD
 TARGET_CONFIG=""  # 指定单个 dp/tp 配置，如 "8 2"
 
 # 主机临时目录
@@ -304,37 +305,47 @@ start_proxy() {
 
 check_service_health() {
     local dp=$1
-
-    # 遍历 P 容器内每个 vllm 端口，探测 /health
     local p_ready=0
-    for (( port=VLLM_START_PORT; port<VLLM_START_PORT+dp; port++ )); do
-        local status
-        status=$(run_p "curl -s -o /dev/null -w '%{http_code}' --connect-timeout 3 http://localhost:${port}/health 2>/dev/null" 2>/dev/null || echo "000")
-        status=$(echo "$status" | tr -d '[:space:]')
-        if [ "$status" = "200" ]; then
-            p_ready=$(( p_ready + 1 ))
-        fi
-    done
-
-    # 遍历 D 容器内每个 vllm 端口，探测 /health
     local d_ready=0
-    for (( port=VLLM_START_PORT; port<VLLM_START_PORT+dp; port++ )); do
-        local status
-        status=$(run_d "curl -s -o /dev/null -w '%{http_code}' --connect-timeout 3 http://localhost:${port}/health 2>/dev/null" 2>/dev/null || echo "000")
-        status=$(echo "$status" | tr -d '[:space:]')
-        if [ "$status" = "200" ]; then
-            d_ready=$(( d_ready + 1 ))
-        fi
-    done
 
-    # 检测 proxy 进程是否在运行
-    local proxy_up
-    proxy_up=$(run_p "pgrep -c -f 'load_balance_proxy_server_example' 2>/dev/null" 2>/dev/null || echo "0")
-    proxy_up=$(echo "$proxy_up" | tr -d '[:space:]')
+    # 检测 P 侧 (如果 CHECK_SIDE 包含 P)
+    if [[ "$CHECK_SIDE" == *"P"* ]]; then
+        for (( port=VLLM_START_PORT; port<VLLM_START_PORT+dp; port++ )); do
+            local status
+            status=$(run_p "curl -s -o /dev/null -w '%{http_code}' --connect-timeout 3 http://localhost:${port}/health 2>/dev/null" 2>/dev/null || echo "000")
+            status=$(echo "$status" | tr -d '[:space:]')
+            if [ "$status" = "200" ]; then
+                p_ready=$(( p_ready + 1 ))
+            fi
+        done
+    else
+        p_ready=$dp  # 跳过检测则视为就绪
+    fi
+
+    # 检测 D 侧 (如果 CHECK_SIDE 包含 D)
+    if [[ "$CHECK_SIDE" == *"D"* ]]; then
+        for (( port=VLLM_START_PORT; port<VLLM_START_PORT+dp; port++ )); do
+            local status
+            status=$(run_d "curl -s -o /dev/null -w '%{http_code}' --connect-timeout 3 http://localhost:${port}/health 2>/dev/null" 2>/dev/null || echo "000")
+            status=$(echo "$status" | tr -d '[:space:]')
+            if [ "$status" = "200" ]; then
+                d_ready=$(( d_ready + 1 ))
+            fi
+        done
+    else
+        d_ready=$dp
+    fi
+
+    # 只有双侧都需要时才检测 proxy (单侧检测不需要 proxy)
+    if [ "$CHECK_SIDE" = "PD" ]; then
+        local proxy_up
+        proxy_up=$(run_p "pgrep -c -f 'load_balance_proxy_server_example' 2>/dev/null" 2>/dev/null || echo "0")
+        proxy_up=$(echo "$proxy_up" | tr -d '[:space:]')
+        [ "$proxy_up" -lt 1 ] 2>/dev/null && return 1
+    fi
 
     if [ "$p_ready" -eq "$dp" ] 2>/dev/null && \
-       [ "$d_ready" -eq "$dp" ] 2>/dev/null && \
-       [ "$proxy_up" -ge 1 ] 2>/dev/null; then
+       [ "$d_ready" -eq "$dp" ] 2>/dev/null; then
         return 0
     fi
 
@@ -359,15 +370,19 @@ wait_for_services() {
 
         # 打印当前端口就绪数
         local p_ok=0; local d_ok=0
-        for (( port=VLLM_START_PORT; port<VLLM_START_PORT+dp; port++ )); do
-            local s=$(run_p "curl -s -o /dev/null -w '%{http_code}' --connect-timeout 2 http://localhost:${port}/health 2>/dev/null" 2>/dev/null | tr -d '[:space:]' || echo "0")
-            [ "$s" = "200" ] && p_ok=$(( p_ok + 1 ))
-        done
-        for (( port=VLLM_START_PORT; port<VLLM_START_PORT+dp; port++ )); do
-            local s=$(run_d "curl -s -o /dev/null -w '%{http_code}' --connect-timeout 2 http://localhost:${port}/health 2>/dev/null" 2>/dev/null | tr -d '[:space:]' || echo "0")
-            [ "$s" = "200" ] && d_ok=$(( d_ok + 1 ))
-        done
-        log "等待中... (${elapsed}s / ${MAX_WAIT}s) | P端口就绪:${p_ok}/${dp} D端口就绪:${d_ok}/${dp}"
+        if [[ "$CHECK_SIDE" == *"P"* ]]; then
+            for (( port=VLLM_START_PORT; port<VLLM_START_PORT+dp; port++ )); do
+                local s=$(run_p "curl -s -o /dev/null -w '%{http_code}' --connect-timeout 2 http://localhost:${port}/health 2>/dev/null" 2>/dev/null | tr -d '[:space:]' || echo "0")
+                [ "$s" = "200" ] && p_ok=$(( p_ok + 1 ))
+            done
+        fi
+        if [[ "$CHECK_SIDE" == *"D"* ]]; then
+            for (( port=VLLM_START_PORT; port<VLLM_START_PORT+dp; port++ )); do
+                local s=$(run_d "curl -s -o /dev/null -w '%{http_code}' --connect-timeout 2 http://localhost:${port}/health 2>/dev/null" 2>/dev/null | tr -d '[:space:]' || echo "0")
+                [ "$s" = "200" ] && d_ok=$(( d_ok + 1 ))
+            done
+        fi
+        log "等待中... (${elapsed}s / ${MAX_WAIT}s) | ${CHECK_SIDE}端口就绪: P:${p_ok}/${dp} D:${d_ok}/${dp}"
 
         # 每60秒打印一次日志尾部用于排查
         if [ $(( elapsed % 60 )) -eq 0 ] && [ $elapsed -gt 0 ]; then
@@ -521,9 +536,9 @@ SUMMARY_EOF
 
 main() {
     if [ "$STARTUP_CHECK_ONLY" = true ]; then
-        log_sep "DeepSeekV4 1P1D 服务启动检查 (仅验证 P/D 能否拉起)"
+        log_sep "DeepSeekV4 1P1D 服务启动检查 (检测范围: ${CHECK_SIDE})"
     else
-        log_sep "DeepSeekV4 1P1D 自动化测试开始"
+        log_sep "DeepSeekV4 1P1D 自动化测试开始 (检测范围: ${CHECK_SIDE})"
     fi
     log "测试时间戳: ${TIMESTAMP}"
     log "P 节点: ${P_NODE}"
@@ -562,7 +577,11 @@ main() {
         }
 
         # ---- Step 1.5: 同步项目文件到 D 节点 ----
-        sync_project_to_d
+        if [[ "$CHECK_SIDE" == *"D"* ]]; then
+            sync_project_to_d
+        else
+            log "仅检测 P 侧，跳过 D 节点同步."
+        fi
 
         # ---- Step 2: 更新 kv_connector_extra_config ----
         update_kv_config "$dp" "$tp" || {
@@ -572,17 +591,29 @@ main() {
         }
 
         # ---- Step 3: 启动 P 实例 ----
-        start_p_instance "$dp" "$tp"
-        log "等待 30 秒让 P 实例初始化..."
-        sleep 30
+        if [[ "$CHECK_SIDE" == *"P"* ]]; then
+            start_p_instance "$dp" "$tp"
+            log "等待 30 秒让 P 实例初始化..."
+            sleep 30
+        else
+            log "仅检测 D 侧，跳过 P 实例启动."
+        fi
 
         # ---- Step 4: 启动 D 实例 ----
-        start_d_instance "$dp" "$tp"
-        log "等待 30 秒让 D 实例初始化..."
-        sleep 30
+        if [[ "$CHECK_SIDE" == *"D"* ]]; then
+            start_d_instance "$dp" "$tp"
+            log "等待 30 秒让 D 实例初始化..."
+            sleep 30
+        else
+            log "仅检测 P 侧，跳过 D 实例启动."
+        fi
 
-        # ---- Step 5: 启动代理 ----
-        start_proxy "$dp"
+        # ---- Step 5: 启动代理 (单侧检测不需要) ----
+        if [ "$CHECK_SIDE" = "PD" ]; then
+            start_proxy "$dp"
+        else
+            log "单侧检测模式 (${CHECK_SIDE})，跳过代理启动."
+        fi
 
         # ---- Step 6: 等待服务就绪 ----
         if ! wait_for_services "$dp" "$tp"; then
@@ -655,6 +686,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --config)
             TARGET_CONFIG="$2"
+            shift 2
+            ;;
+        --check)
+            CHECK_SIDE="$2"
             shift 2
             ;;
         --force|-f)
