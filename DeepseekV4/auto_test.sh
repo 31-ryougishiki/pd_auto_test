@@ -301,24 +301,35 @@ start_proxy() {
 check_service_health() {
     local dp=$1
 
-    # 检测 P 节点容器内 vllm 进程数 (每个 dp rank 一个 vllm serve 进程)
-    local p_running
-    p_running=$(run_p "pgrep -c -f 'vllm serve' 2>/dev/null" 2>/dev/null || echo "0")
-    p_running=$(echo "$p_running" | tr -d '[:space:]')
+    # 遍历 P 容器内每个 vllm 端口，探测 /health
+    local p_ready=0
+    for (( port=VLLM_START_PORT; port<VLLM_START_PORT+dp; port++ )); do
+        local status
+        status=$(run_p "curl -s -o /dev/null -w '%{http_code}' --connect-timeout 3 http://localhost:${port}/health 2>/dev/null" 2>/dev/null || echo "000")
+        status=$(echo "$status" | tr -d '[:space:]')
+        if [ "$status" = "200" ]; then
+            p_ready=$(( p_ready + 1 ))
+        fi
+    done
 
-    # 检测 D 节点容器内 vllm 进程数
-    local d_running
-    d_running=$(run_d "pgrep -c -f 'vllm serve' 2>/dev/null" 2>/dev/null || echo "0")
-    d_running=$(echo "$d_running" | tr -d '[:space:]')
+    # 遍历 D 容器内每个 vllm 端口，探测 /health
+    local d_ready=0
+    for (( port=VLLM_START_PORT; port<VLLM_START_PORT+dp; port++ )); do
+        local status
+        status=$(run_d "curl -s -o /dev/null -w '%{http_code}' --connect-timeout 3 http://localhost:${port}/health 2>/dev/null" 2>/dev/null || echo "000")
+        status=$(echo "$status" | tr -d '[:space:]')
+        if [ "$status" = "200" ]; then
+            d_ready=$(( d_ready + 1 ))
+        fi
+    done
 
-    # 检测 proxy 是否在运行
+    # 检测 proxy 进程是否在运行
     local proxy_up
     proxy_up=$(run_p "pgrep -c -f 'load_balance_proxy_server_example' 2>/dev/null" 2>/dev/null || echo "0")
     proxy_up=$(echo "$proxy_up" | tr -d '[:space:]')
 
-    # vllm 进程数 >= dp 即认为实例已拉起 (vllm serve 只有在模型加载完成后才会启动 HTTP server)
-    if [ "$p_running" -ge "$dp" ] 2>/dev/null && \
-       [ "$d_running" -ge "$dp" ] 2>/dev/null && \
+    if [ "$p_ready" -eq "$dp" ] 2>/dev/null && \
+       [ "$d_ready" -eq "$dp" ] 2>/dev/null && \
        [ "$proxy_up" -ge 1 ] 2>/dev/null; then
         return 0
     fi
@@ -342,10 +353,17 @@ wait_for_services() {
             return 0
         fi
 
-        # 打印当前进程计数
-        local p_now=$(run_p "pgrep -c -f 'vllm serve' 2>/dev/null || echo 0" 2>/dev/null | tr -d '[:space:]')
-        local d_now=$(run_d "pgrep -c -f 'vllm serve' 2>/dev/null || echo 0" 2>/dev/null | tr -d '[:space:]')
-        log "等待中... (${elapsed}s / ${MAX_WAIT}s) | P_vllm:${p_now} D_vllm:${d_now} (目标:>=${dp})"
+        # 打印当前端口就绪数
+        local p_ok=0; local d_ok=0
+        for (( port=VLLM_START_PORT; port<VLLM_START_PORT+dp; port++ )); do
+            local s=$(run_p "curl -s -o /dev/null -w '%{http_code}' --connect-timeout 2 http://localhost:${port}/health 2>/dev/null" 2>/dev/null | tr -d '[:space:]' || echo "0")
+            [ "$s" = "200" ] && p_ok=$(( p_ok + 1 ))
+        done
+        for (( port=VLLM_START_PORT; port<VLLM_START_PORT+dp; port++ )); do
+            local s=$(run_d "curl -s -o /dev/null -w '%{http_code}' --connect-timeout 2 http://localhost:${port}/health 2>/dev/null" 2>/dev/null | tr -d '[:space:]' || echo "0")
+            [ "$s" = "200" ] && d_ok=$(( d_ok + 1 ))
+        done
+        log "等待中... (${elapsed}s / ${MAX_WAIT}s) | P端口就绪:${p_ok}/${dp} D端口就绪:${d_ok}/${dp}"
 
         # 每60秒打印一次日志尾部用于排查
         if [ $(( elapsed % 60 )) -eq 0 ] && [ $elapsed -gt 0 ]; then
@@ -389,12 +407,18 @@ run_benchmark() {
         local run_name="run_${run_idx}"
         log_sep "执行第 ${run_idx} 次测试: config=${config_name}"
 
-        # 记录服务进程状态 (保存到容器内)
-        log "记录服务进程状态..."
-        run_p "echo 'P vllm processes:' > ${config_result_dir}/health_${run_name}.txt; \
-               pgrep -c -f 'vllm serve' 2>/dev/null >> ${config_result_dir}/health_${run_name}.txt; \
-               echo 'D vllm processes:' >> ${config_result_dir}/health_${run_name}.txt" 2>/dev/null || true
-        run_d "pgrep -c -f 'vllm serve' 2>/dev/null >> ${config_result_dir}/health_${run_name}.txt" 2>/dev/null || true
+        # 记录每个端口健康状态 (保存到容器内)
+        log "记录 vllm 端口健康状态..."
+        run_p "echo '=== P 节点端口探测 ===' > ${config_result_dir}/health_${run_name}.txt" 2>/dev/null || true
+        for (( port=VLLM_START_PORT; port<VLLM_START_PORT+dp; port++ )); do
+            local ps=$(run_p "curl -s -o /dev/null -w '%{http_code}' --connect-timeout 2 http://localhost:${port}/health 2>/dev/null" 2>/dev/null | tr -d '[:space:]' || echo "0")
+            run_p "echo 'P:${port} -> ${ps}' >> ${config_result_dir}/health_${run_name}.txt" 2>/dev/null || true
+        done
+        run_p "echo '=== D 节点端口探测 ===' >> ${config_result_dir}/health_${run_name}.txt" 2>/dev/null || true
+        for (( port=VLLM_START_PORT; port<VLLM_START_PORT+dp; port++ )); do
+            local ds=$(run_d "curl -s -o /dev/null -w '%{http_code}' --connect-timeout 2 http://localhost:${port}/health 2>/dev/null" 2>/dev/null | tr -d '[:space:]' || echo "0")
+            run_p "echo 'D:${port} -> ${ds}' >> ${config_result_dir}/health_${run_name}.txt" 2>/dev/null || true
+        done
 
         # 在 D 节点的 vllm_performance_test 容器中运行测试
         log "在 D 节点 (${D_NODE}) 的 ${TEST_CONTAINER} 容器中运行 run.sh..."
@@ -426,10 +450,13 @@ run_benchmark() {
             log "警告: 第 ${run_idx} 次测试退出码非零: ${test_exit_code} (耗时 ${test_duration}s)"
             # 采集错误诊断信息
             log "--- 错误诊断: 采集后端状态 ---"
-            log "P 节点 vllm 进程数:"
-            run_p "pgrep -c -f 'vllm serve' 2>/dev/null || echo 0" 2>/dev/null || echo "(检测失败)"
-            log "D 节点 vllm 进程数:"
-            run_d "pgrep -c -f 'vllm serve' 2>/dev/null || echo 0" 2>/dev/null || echo "(检测失败)"
+            log "P 节点 vllm 端口探测 (7100-71$((dp-1))):"
+            for (( port=VLLM_START_PORT; port<VLLM_START_PORT+dp; port++ )); do
+                local s=$(run_p "curl -s -o /dev/null -w '%{http_code}' --connect-timeout 2 http://localhost:${port}/health 2>/dev/null" 2>/dev/null | tr -d '[:space:]' || echo "0")
+                echo -n " ${port}:${s}"
+            done
+            echo ""
+            log "D 节点 vllm 端口探测:"
             run_p "tail -30 /tmp/p_instance_dp${dp}_tp${tp}.log 2>/dev/null" 2>/dev/null || echo "(无日志)"
             log "D 节点 vllm 日志 (尾部):"
             run_d "tail -30 /tmp/d_instance_dp${dp}_tp${tp}.log 2>/dev/null" 2>/dev/null || echo "(无日志)"
