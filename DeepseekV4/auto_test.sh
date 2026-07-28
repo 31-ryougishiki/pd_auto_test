@@ -417,18 +417,18 @@ wait_for_services() {
         fi
         log "等待中... (${elapsed}s / ${MAX_WAIT}s) | ${CHECK_SIDE}端口就绪: P:${p_ok}/${dp} D:${d_ok}/${dp}"
 
-        # 每60秒打印一次日志尾部用于排查
-        if [ $(( elapsed % 60 )) -eq 0 ] && [ $elapsed -gt 0 ]; then
+        # 每15秒打印一次日志尾部用于排查
+        if [ $elapsed -gt 0 ]; then
             if [[ "$CHECK_SIDE" == *"P"* ]]; then
-                log "--- P 实例日志尾部 ---"
+                log "--- P 实例日志尾部 (${elapsed}s) ---"
                 run_p "tail -5 /tmp/p_instance_dp${dp}_tp${tp}.log 2>/dev/null" 2>/dev/null || true
             fi
             if [[ "$CHECK_SIDE" == *"D"* ]]; then
-                log "--- D 实例日志尾部 ---"
+                log "--- D 实例日志尾部 (${elapsed}s) ---"
                 run_d "tail -5 /tmp/d_instance_dp${dp}_tp${tp}.log 2>/dev/null" 2>/dev/null || true
             fi
             if [ "$CHECK_SIDE" = "PD" ]; then
-                log "--- 代理日志尾部 ---"
+                log "--- 代理日志尾部 (${elapsed}s) ---"
                 run_p "tail -5 /tmp/proxy_dp${dp}.log 2>/dev/null" 2>/dev/null || true
             fi
         fi
@@ -639,7 +639,11 @@ main() {
         if [[ "$CHECK_SIDE" == *"P"* ]]; then
             start_p_instance "$dp" "$tp"
             log "等待 30 秒让 P 实例初始化..."
-            sleep 30
+            for i in 15 30; do
+                sleep 15
+                log "--- P 实例日志尾部 (初始化 ${i}s) ---"
+                run_p "tail -5 /tmp/p_instance_dp${dp}_tp${tp}.log 2>/dev/null" 2>/dev/null || true
+            done
         else
             log "仅检测 D 侧，跳过 P 实例启动."
         fi
@@ -648,7 +652,11 @@ main() {
         if [[ "$CHECK_SIDE" == *"D"* ]]; then
             start_d_instance "$dp" "$tp"
             log "等待 30 秒让 D 实例初始化..."
-            sleep 30
+            for i in 15 30; do
+                sleep 15
+                log "--- D 实例日志尾部 (初始化 ${i}s) ---"
+                run_d "tail -5 /tmp/d_instance_dp${dp}_tp${tp}.log 2>/dev/null" 2>/dev/null || true
+            done
         else
             log "仅检测 P 侧，跳过 D 实例启动."
         fi
