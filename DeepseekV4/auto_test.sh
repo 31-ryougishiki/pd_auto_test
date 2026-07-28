@@ -40,6 +40,7 @@ TEST_CONTAINER="vllm_performance_test"
 # 容器内路径
 PD_AUTO_TEST_PATH="/opt/its/z30055003/pd_auto_test"
 AISBENCH_PATH="/opt/its/z30055003/aisbench_auto_tools_prefix-main"
+DOCKER_SCRIPTS_PATH="/opt/its/z30055003/DeepSeekV4/docker"
 
 # 脚本路径 (容器内)
 P_SCRIPT_DIR="${PD_AUTO_TEST_PATH}/DeepseekV4/1P1D/P0"
@@ -126,6 +127,35 @@ stop_all_services() {
 
     sleep 5
     log "所有服务已停止."
+}
+
+# 在两个节点上拉起容器
+setup_containers() {
+    log_sep "拉起容器..."
+
+    # P 节点: 启动 vllm_deepseek_v4 容器
+    log "P 节点 (${P_NODE}): 启动 ${VLLM_CONTAINER} 容器..."
+    cd "${DOCKER_SCRIPTS_PATH}" && bash start_docker.sh
+    log "P 节点 ${VLLM_CONTAINER} 容器已启动."
+
+    # P 节点: 启动 benchmark 容器
+    log "P 节点 (${P_NODE}): 启动 ${TEST_CONTAINER} 容器..."
+    cd "${DOCKER_SCRIPTS_PATH}" && bash start_docker_benchmark.sh
+    log "P 节点 ${TEST_CONTAINER} 容器已启动."
+
+    # D 节点: 启动 vllm_deepseek_v4 容器
+    log "D 节点 (${D_NODE}): 启动 ${VLLM_CONTAINER} 容器..."
+    ssh "$D_NODE" "cd ${DOCKER_SCRIPTS_PATH} && bash start_docker.sh"
+    log "D 节点 ${VLLM_CONTAINER} 容器已启动."
+
+    # D 节点: 启动 benchmark 容器
+    log "D 节点 (${D_NODE}): 启动 ${TEST_CONTAINER} 容器..."
+    ssh "$D_NODE" "cd ${DOCKER_SCRIPTS_PATH} && bash start_docker_benchmark.sh"
+    log "D 节点 ${TEST_CONTAINER} 容器已启动."
+
+    # 等待容器完全就绪
+    sleep 5
+    log "所有容器已拉起."
 }
 
 update_kv_config() {
@@ -542,9 +572,17 @@ if ! command -v scp &> /dev/null; then
     exit 1
 fi
 
-# 检查 P 节点上的 vllm 容器是否在运行
+# 拉起所有需要的容器
+if [ "$1" = "--skip-setup" ] || [ "$2" = "--skip-setup" ]; then
+    log "跳过容器拉起 (--skip-setup)"
+else
+    log "检查并拉起容器..."
+    setup_containers
+fi
+
+# 验证 P 节点容器
 if ! docker ps --format '{{.Names}}' | grep -q "^${VLLM_CONTAINER}$"; then
-    log "错误: P 节点上容器 ${VLLM_CONTAINER} 未运行"
+    log "错误: P 节点上容器 ${VLLM_CONTAINER} 启动失败"
     exit 1
 fi
 log "P 节点容器 ${VLLM_CONTAINER} 运行中."
@@ -557,15 +595,15 @@ if ! ssh -o ConnectTimeout=5 -o BatchMode=yes "$D_NODE" "echo ok" &> /dev/null; 
 fi
 log "SSH 到 D 节点 (${D_NODE}) 免密登录正常."
 
-# 检查 D 节点上的容器是否在运行
+# 验证 D 节点容器
 if ! ssh "$D_NODE" "docker ps --format '{{.Names}}'" 2>/dev/null | grep -q "^${VLLM_CONTAINER}$"; then
-    log "错误: D 节点上容器 ${VLLM_CONTAINER} 未运行"
+    log "错误: D 节点上容器 ${VLLM_CONTAINER} 启动失败"
     exit 1
 fi
 log "D 节点容器 ${VLLM_CONTAINER} 运行中."
 
 if ! ssh "$D_NODE" "docker ps --format '{{.Names}}'" 2>/dev/null | grep -q "^${TEST_CONTAINER}$"; then
-    log "错误: D 节点上容器 ${TEST_CONTAINER} 未运行"
+    log "错误: D 节点上容器 ${TEST_CONTAINER} 启动失败"
     exit 1
 fi
 log "D 节点容器 ${TEST_CONTAINER} 运行中."
